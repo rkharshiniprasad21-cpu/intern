@@ -1,0 +1,123 @@
+# ============================================================
+# .github/workflows/daily_pipeline.yml
+# ============================================================
+# GitHub Actions Workflow — RemoteOK Daily Data Pipeline
+#
+# WHAT THIS FILE DOES:
+#   GitHub Actions reads this YAML file and uses it to run your
+#   Python pipeline automatically. Think of it as a cron job
+#   hosted for free on GitHub's servers.
+#
+# TRIGGERS:
+#   1. schedule  – Runs every day at 06:00 UTC (cron syntax below)
+#   2. workflow_dispatch – Lets you click "Run workflow" manually
+#                          in the GitHub Actions tab — very useful
+#                          for testing before the next scheduled run.
+#
+# SECRETS REQUIRED (add under Repo → Settings → Secrets → Actions):
+#   SUPABASE_URL   – Your Supabase project URL
+#   SUPABASE_KEY   – Your Supabase service_role key
+#
+# UNDERSTANDING CRON SYNTAX:
+#   "0 6 * * *"
+#    │ │ │ │ └── day of week (0=Sun … 6=Sat), * = every day
+#    │ │ │ └──── month, * = every month
+#    │ │ └────── day of month, * = every day
+#    │ └──────── hour (UTC), 6 = 06:00
+#    └────────── minute, 0 = on the hour
+# ============================================================
+
+name: RemoteOK Daily Pipeline
+
+on:
+  # ── Scheduled run ──────────────────────────────────────────
+  schedule:
+    - cron: "0 6 * * *"   # Every day at 06:00 UTC
+
+  # ── Manual trigger (GitHub UI) ─────────────────────────────
+  workflow_dispatch:
+    inputs:
+      log_level:
+        description: "Log level (DEBUG / INFO / WARNING)"
+        required: false
+        default: "INFO"
+
+# Cancel any in-progress run of this workflow if a new one starts.
+# Prevents two pipeline runs from writing to Supabase simultaneously.
+concurrency:
+  group: remoteok-pipeline
+  cancel-in-progress: true
+
+jobs:
+  run-pipeline:
+    name: Fetch & Store RemoteOK Jobs
+    runs-on: ubuntu-latest   # Free Linux runner provided by GitHub
+
+    # ── Environment variables ────────────────────────────────
+    # ${{ secrets.X }} reads from Repo → Settings → Secrets.
+    # Never put actual secret values directly in this file.
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+      LOG_LEVEL:    ${{ github.event.inputs.log_level || 'INFO' }}
+
+    steps:
+      # ── Step 1: Check out your repository code ─────────────
+      # Without this step the runner has no access to your files.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 2: Install Python ──────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          # Cache pip downloads so repeated runs are faster.
+          # The cache key changes whenever requirements.txt changes.
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      # ── Step 3: Install dependencies ───────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ── Step 4: Run the pipeline ────────────────────────────
+      # PYTHONPATH=src tells Python where to find our modules.
+      # The exit code of main.py determines whether this step
+      # succeeds (0) or fails (non-zero), which in turn marks
+      # the whole workflow run as ✓ or ✗.
+      - name: Run RemoteOK pipeline
+        run: |
+          echo "Starting pipeline at $(date -u)"
+          python -m src.main
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      # ── Step 5: Upload logs on failure ─────────────────────
+      # If the pipeline crashes, this step uploads any log files
+      # as "artifacts" so you can download and inspect them from
+      # the GitHub Actions UI without SSH-ing into anything.
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 7   # Auto-deleted after 7 days
+
+      # ── Step 6: Summary ────────────────────────────────────
+      # Writes a one-line summary to the GitHub Actions job summary
+      # page, visible without opening the log.
+      - name: Write job summary
+        if: always()   # Run even if previous steps failed
+        run: |
+          echo "## RemoteOK Pipeline Run" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Run ID | ${{ github.run_id }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Trigger | ${{ github.event_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Time (UTC) | $(date -u) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
